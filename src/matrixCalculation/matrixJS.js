@@ -44,8 +44,8 @@ const cofactor = (matrix, row, col) => {
   return ((row + col) % 2 === 0 ? 1 : -1) * determinant(minor);
 }
 
-// Helper function to calculate the transpose
-const transpose = (matrix) => {
+// Calculates the transpose of a matrix
+export const transposeJS = (matrix) => {
   const n = matrix.length;
   const transposedMatrix = [];
   for (let i = 0; i < n; i++) {
@@ -67,7 +67,7 @@ export const adjointJS = (matrix) => {
       adjMatrix[i][j] = cofactor(matrix, i, j);
     }
   }
-  return transpose(adjMatrix);
+  return transposeJS(adjMatrix);
 }
 
 // Calculates the inverse of a matrix
@@ -88,16 +88,4 @@ export const inverseJS = (matrix) => {
   }
 
   return inverseMatrix;
-}
-
-export const printIntMatrix = (matrix) => {
-  for (let i = 0; i < matrix.length; i++) {
-    console.log(matrix[i].join(" "))
-  }
-}
-
-export const printFloatMatrix = (matrix) => {
-  for (let i = 0; i < matrix.length; i++) {
-    console.log(matrix[i].map((value) => value.toFixed(3)).join(" "))
-  }
 }

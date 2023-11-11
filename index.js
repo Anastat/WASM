@@ -1,13 +1,15 @@
 import { performance } from "perf_hooks"
 import {
+  transposeJS,
   adjointJS,
   inverseJS,
-  printIntMatrix,
-  printFloatMatrix,
-} from "./src/matrix.js"
-import WasmModule from "./src/matrix_wasm.js"
-
-let Module = await WasmModule()
+} from "./src/matrixCalculation/matrixJS.js"
+import {
+  transposeWASM,
+  adjointWASM,
+  inverseWASM,
+} from "./src/matrixCalculation/matrixWASM.js"
+import { printIntMatrix, printFloatMatrix } from "./src/utils.js"
 
 const inputMatrix = [
   [5, -2, 2, 7],
@@ -16,51 +18,68 @@ const inputMatrix = [
   [3, -1, -9, 4],
 ]
 
+// Transpose JS
+const startTransposeJs = performance.now()
+transposeJS(inputMatrix)
+const endTransposeJs = performance.now()
+
+console.log(
+  `Execution time of matrix transpose JavaScript is: ${
+    endTransposeJs - startTransposeJs
+  } ms`
+)
+
 // Adjoint JS
 const startAdjointJs = performance.now()
-printIntMatrix(adjointJS(inputMatrix))
+adjointJS(inputMatrix)
 const endAdjointJs = performance.now()
 
-console.log(`Execution time: ${endAdjointJs - startAdjointJs} ms`)
+console.log(
+  `Execution time of matrix adjoint JavaScript is: ${
+    endAdjointJs - startAdjointJs
+  } ms`
+)
 
 // Inverse JS
 const startInverseJS = performance.now()
-printFloatMatrix(inverseJS(inputMatrix))
+inverseJS(inputMatrix)
 const endInverseJs = performance.now()
 
-console.log(`Execution time: ${endInverseJs - startInverseJS} ms`)
-
-// Measure WASM
-const startAdjointCPP = performance.now()
-
-const numRows = inputMatrix.length
-const numCols = inputMatrix[0].length
-
-const flattenedMatrix = new Float32Array(numRows * numCols)
-for (let i = 0; i < numRows; i++) {
-  for (let j = 0; j < numCols; j++) {
-    flattenedMatrix[i * numCols + j] = inputMatrix[i][j]
-  }
-}
-
-const inputMatrixPtr = Module._malloc(
-  flattenedMatrix.length * flattenedMatrix.BYTES_PER_ELEMENT
+console.log(
+  `Execution time of matrix inverse JavaScript is: ${
+    endInverseJs - startInverseJS
+  } ms`
 )
 
-Module.HEAPF32.set(flattenedMatrix, inputMatrixPtr >> 2)
+// Transpose WASM
+const startTransposeWasm = performance.now()
+transposeWASM(inputMatrix)
+const endTransposeWasm = performance.now()
 
-const adjointMatrixPtr = Module._adjointCPP(inputMatrixPtr, numRows)
-
-// Extract the result as a 1D array
-const adjointArray = Module.HEAPF32.subarray(
-  adjointMatrixPtr >> 2,
-  adjointMatrixPtr >> (2 + numRows * numRows)
+console.log(
+  `Execution time of matrix transpose WASM is: ${
+    endTransposeWasm - startTransposeWasm
+  } ms`
 )
 
-// Free memory
-Module._free(inputMatrixPtr)
-Module._free(adjointMatrixPtr)
+// Adjoint WASM
+const startAdjointWasm = performance.now()
+adjointWASM(inputMatrix)
+const endAdjointWasm = performance.now()
 
-const endAdjointCPP = performance.now()
+console.log(
+  `Execution time of matrix adjoint WASM is: ${
+    endAdjointWasm - startAdjointWasm
+  } ms`
+)
 
-console.log(`Execution time: ${endAdjointCPP - startAdjointCPP} ms`)
+// Inverse WASM
+const startInverseWasm = performance.now()
+inverseWASM(inputMatrix)
+const endInverseWasm = performance.now()
+
+console.log(
+  `Execution time of matrix inverse WASM is: ${
+    endInverseWasm - startInverseWasm
+  } ms`
+)

@@ -27,7 +27,7 @@ Module['ready'] = new Promise((resolve, reject) => {
   readyPromiseResolve = resolve;
   readyPromiseReject = reject;
 });
-["_free","_malloc","_adjointCPP","_inverseCPP","_memory","___indirect_function_table","_fflush","onRuntimeInitialized"].forEach((prop) => {
+["_malloc","_free","_memory","_transposeCPP","_adjointCPP","_inverseCPP","___indirect_function_table","_fflush","onRuntimeInitialized"].forEach((prop) => {
   if (!Object.getOwnPropertyDescriptor(Module['ready'], prop)) {
     Object.defineProperty(Module['ready'], prop, {
       get: () => abort('You are getting ' + prop + ' on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js'),
@@ -719,13 +719,13 @@ function createExportWrapper(name) {
 // end include: runtime_exceptions.js
 var wasmBinaryFile;
 if (Module['locateFile']) {
-  wasmBinaryFile = 'matrix_wasm.wasm';
+  wasmBinaryFile = 'output_wasm.wasm';
   if (!isDataURI(wasmBinaryFile)) {
     wasmBinaryFile = locateFile(wasmBinaryFile);
   }
 } else {
   // Use bundler-friendly `new URL(..., import.meta.url)` pattern; works in browsers too.
-  wasmBinaryFile = new URL('matrix_wasm.wasm', import.meta.url).href;
+  wasmBinaryFile = new URL('output_wasm.wasm', import.meta.url).href;
 }
 
 function getBinarySync(file) {
@@ -1004,7 +1004,6 @@ function dbg(text) {
       this.message = `Program terminated with exit(${status})`;
       this.status = status;
     }
-  Module['ExitStatus'] = ExitStatus;
 
   var callRuntimeCallbacks = (callbacks) => {
       while (callbacks.length > 0) {
@@ -1012,7 +1011,6 @@ function dbg(text) {
         callbacks.shift()(Module);
       }
     };
-  Module['callRuntimeCallbacks'] = callRuntimeCallbacks;
 
   
     /**
@@ -1033,7 +1031,6 @@ function dbg(text) {
       default: abort(`invalid type for getValue: ${type}`);
     }
   }
-  Module['getValue'] = getValue;
 
   var ptrToString = (ptr) => {
       assert(typeof ptr === 'number');
@@ -1041,7 +1038,6 @@ function dbg(text) {
       ptr >>>= 0;
       return '0x' + ptr.toString(16).padStart(8, '0');
     };
-  Module['ptrToString'] = ptrToString;
 
   
     /**
@@ -1063,7 +1059,6 @@ function dbg(text) {
       default: abort(`invalid type for setValue: ${type}`);
     }
   }
-  Module['setValue'] = setValue;
 
   var warnOnce = (text) => {
       if (!warnOnce.shown) warnOnce.shown = {};
@@ -1073,103 +1068,32 @@ function dbg(text) {
         err(text);
       }
     };
-  Module['warnOnce'] = warnOnce;
 
   var _abort = () => {
       abort('native code called abort()');
     };
-  Module['_abort'] = _abort;
 
   var _emscripten_memcpy_js = (dest, src, num) => HEAPU8.copyWithin(dest, src, src + num);
-  Module['_emscripten_memcpy_js'] = _emscripten_memcpy_js;
 
   var getHeapMax = () =>
-      // Stay one Wasm page short of 4GB: while e.g. Chrome is able to allocate
-      // full 4GB Wasm memories, the size will wrap back to 0 bytes in Wasm side
-      // for any code that deals with heap sizes, which would require special
-      // casing all heap size related code to treat 0 specially.
-      2147483648;
-  Module['getHeapMax'] = getHeapMax;
+      HEAPU8.length;
   
-  var growMemory = (size) => {
-      var b = wasmMemory.buffer;
-      var pages = (size - b.byteLength + 65535) / 65536;
-      try {
-        // round size grow request up to wasm page size (fixed 64KB per spec)
-        wasmMemory.grow(pages); // .grow() takes a delta compared to the previous size
-        updateMemoryViews();
-        return 1 /*success*/;
-      } catch(e) {
-        err(`growMemory: Attempted to grow heap from ${b.byteLength} bytes to ${size} bytes, but got error: ${e}`);
-      }
-      // implicit 0 return to save code size (caller will cast "undefined" into 0
-      // anyhow)
+  var abortOnCannotGrowMemory = (requestedSize) => {
+      abort(`Cannot enlarge memory arrays to size ${requestedSize} bytes (OOM). Either (1) compile with -sINITIAL_MEMORY=X with X higher than the current value ${HEAP8.length}, (2) compile with -sALLOW_MEMORY_GROWTH which allows increasing the size at runtime, or (3) if you want malloc to return NULL (0) instead of this abort, compile with -sABORTING_MALLOC=0`);
     };
-  Module['growMemory'] = growMemory;
   var _emscripten_resize_heap = (requestedSize) => {
       var oldSize = HEAPU8.length;
       // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
       requestedSize >>>= 0;
-      // With multithreaded builds, races can happen (another thread might increase the size
-      // in between), so return a failure, and let the caller retry.
-      assert(requestedSize > oldSize);
-  
-      // Memory resize rules:
-      // 1.  Always increase heap size to at least the requested size, rounded up
-      //     to next page multiple.
-      // 2a. If MEMORY_GROWTH_LINEAR_STEP == -1, excessively resize the heap
-      //     geometrically: increase the heap size according to
-      //     MEMORY_GROWTH_GEOMETRIC_STEP factor (default +20%), At most
-      //     overreserve by MEMORY_GROWTH_GEOMETRIC_CAP bytes (default 96MB).
-      // 2b. If MEMORY_GROWTH_LINEAR_STEP != -1, excessively resize the heap
-      //     linearly: increase the heap size by at least
-      //     MEMORY_GROWTH_LINEAR_STEP bytes.
-      // 3.  Max size for the heap is capped at 2048MB-WASM_PAGE_SIZE, or by
-      //     MAXIMUM_MEMORY, or by ASAN limit, depending on which is smallest
-      // 4.  If we were unable to allocate as much memory, it may be due to
-      //     over-eager decision to excessively reserve due to (3) above.
-      //     Hence if an allocation fails, cut down on the amount of excess
-      //     growth, in an attempt to succeed to perform a smaller allocation.
-  
-      // A limit is set for how much we can grow. We should not exceed that
-      // (the wasm binary specifies it, so if we tried, we'd fail anyhow).
-      var maxHeapSize = getHeapMax();
-      if (requestedSize > maxHeapSize) {
-        err(`Cannot enlarge memory, requested ${requestedSize} bytes, but the limit is ${maxHeapSize} bytes!`);
-        return false;
-      }
-  
-      var alignUp = (x, multiple) => x + (multiple - x % multiple) % multiple;
-  
-      // Loop through potential heap size increases. If we attempt a too eager
-      // reservation that fails, cut down on the attempted size and reserve a
-      // smaller bump instead. (max 3 times, chosen somewhat arbitrarily)
-      for (var cutDown = 1; cutDown <= 4; cutDown *= 2) {
-        var overGrownHeapSize = oldSize * (1 + 0.2 / cutDown); // ensure geometric growth
-        // but limit overreserving (default to capping at +96MB overgrowth at most)
-        overGrownHeapSize = Math.min(overGrownHeapSize, requestedSize + 100663296 );
-  
-        var newSize = Math.min(maxHeapSize, alignUp(Math.max(requestedSize, overGrownHeapSize), 65536));
-  
-        var replacement = growMemory(newSize);
-        if (replacement) {
-  
-          return true;
-        }
-      }
-      err(`Failed to grow the heap from ${oldSize} bytes to ${newSize} bytes, not enough memory!`);
-      return false;
+      abortOnCannotGrowMemory(requestedSize);
     };
-  Module['_emscripten_resize_heap'] = _emscripten_resize_heap;
 
   var ENV = {
   };
-  Module['ENV'] = ENV;
   
   var getExecutableName = () => {
       return thisProgram || './this.program';
     };
-  Module['getExecutableName'] = getExecutableName;
   var getEnvStrings = () => {
       if (!getEnvStrings.strings) {
         // Default values.
@@ -1200,7 +1124,6 @@ function dbg(text) {
       }
       return getEnvStrings.strings;
     };
-  Module['getEnvStrings'] = getEnvStrings;
   
   var stringToAscii = (str, buffer) => {
       for (var i = 0; i < str.length; ++i) {
@@ -1210,7 +1133,6 @@ function dbg(text) {
       // Null-terminate the string
       HEAP8[((buffer)>>0)] = 0;
     };
-  Module['stringToAscii'] = stringToAscii;
   
   var PATH = {
   isAbs:(path) => path.charAt(0) === '/',
@@ -1285,7 +1207,6 @@ function dbg(text) {
         return PATH.normalize(l + '/' + r);
       },
   };
-  Module['PATH'] = PATH;
   
   var initRandomFill = () => {
       if (typeof crypto == 'object' && typeof crypto['getRandomValues'] == 'function') {
@@ -1315,12 +1236,10 @@ function dbg(text) {
       // we couldn't find a proper implementation, as Math.random() is not suitable for /dev/random, see emscripten-core/emscripten/pull/7096
       abort("no cryptographic support found for randomDevice. consider polyfilling it if you want to use something insecure like Math.random(), e.g. put this in a --pre-js: var crypto = { getRandomValues: (array) => { for (var i = 0; i < array.length; i++) array[i] = (Math.random()*256)|0 } };");
     };
-  Module['initRandomFill'] = initRandomFill;
   var randomFill = (view) => {
       // Lazily init on the first invocation.
       return (randomFill = initRandomFill())(view);
     };
-  Module['randomFill'] = randomFill;
   
   
   
@@ -1377,11 +1296,9 @@ function dbg(text) {
         return outputParts.join('/');
       },
   };
-  Module['PATH_FS'] = PATH_FS;
   
   
   var UTF8Decoder = typeof TextDecoder != 'undefined' ? new TextDecoder('utf8') : undefined;
-  Module['UTF8Decoder'] = UTF8Decoder;
   
     /**
      * Given a pointer 'idx' to a null-terminated UTF8-encoded string in the given
@@ -1434,10 +1351,8 @@ function dbg(text) {
       }
       return str;
     };
-  Module['UTF8ArrayToString'] = UTF8ArrayToString;
   
   var FS_stdin_getChar_buffer = [];
-  Module['FS_stdin_getChar_buffer'] = FS_stdin_getChar_buffer;
   
   var lengthBytesUTF8 = (str) => {
       var len = 0;
@@ -1459,7 +1374,6 @@ function dbg(text) {
       }
       return len;
     };
-  Module['lengthBytesUTF8'] = lengthBytesUTF8;
   
   var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       assert(typeof str === 'string');
@@ -1508,7 +1422,6 @@ function dbg(text) {
       heap[outIdx] = 0;
       return outIdx - startIdx;
     };
-  Module['stringToUTF8Array'] = stringToUTF8Array;
   /** @type {function(string, boolean=, number=)} */
   function intArrayFromString(stringy, dontAddNull, length) {
     var len = length > 0 ? length : lengthBytesUTF8(stringy)+1;
@@ -1517,7 +1430,6 @@ function dbg(text) {
     if (dontAddNull) u8array.length = numBytesWritten;
     return u8array;
   }
-  Module['intArrayFromString'] = intArrayFromString;
   var FS_stdin_getChar = () => {
       if (!FS_stdin_getChar_buffer.length) {
         var result = null;
@@ -1572,7 +1484,6 @@ function dbg(text) {
       }
       return FS_stdin_getChar_buffer.shift();
     };
-  Module['FS_stdin_getChar'] = FS_stdin_getChar;
   var TTY = {
   ttys:[],
   init() {
@@ -1714,24 +1625,20 @@ function dbg(text) {
         },
   },
   };
-  Module['TTY'] = TTY;
   
   
   var zeroMemory = (address, size) => {
       HEAPU8.fill(0, address, address + size);
       return address;
     };
-  Module['zeroMemory'] = zeroMemory;
   
   var alignMemory = (size, alignment) => {
       assert(alignment, "alignment argument is required");
       return Math.ceil(size / alignment) * alignment;
     };
-  Module['alignMemory'] = alignMemory;
   var mmapAlloc = (size) => {
       abort('internal error: mmapAlloc called but `emscripten_builtin_memalign` native symbol not exported');
     };
-  Module['mmapAlloc'] = mmapAlloc;
   var MEMFS = {
   ops_table:null,
   mount(mount) {
@@ -1969,13 +1876,6 @@ function dbg(text) {
   write(stream, buffer, offset, length, position, canOwn) {
           // The data buffer should be a typed array view
           assert(!(buffer instanceof ArrayBuffer));
-          // If the buffer is located in main memory (HEAP), and if
-          // memory can grow, we can't hold on to references of the
-          // memory buffer, as they may get invalidated. That means we
-          // need to do copy its contents.
-          if (buffer.buffer === HEAP8.buffer) {
-            canOwn = false;
-          }
   
           if (!length) return 0;
           var node = stream.node;
@@ -2066,7 +1966,6 @@ function dbg(text) {
         },
   },
   };
-  Module['MEMFS'] = MEMFS;
   
   /** @param {boolean=} noRunDep */
   var asyncLoad = (url, onload, onerror, noRunDep) => {
@@ -2084,16 +1983,13 @@ function dbg(text) {
       });
       if (dep) addRunDependency(dep);
     };
-  Module['asyncLoad'] = asyncLoad;
   
   
   var FS_createDataFile = (parent, name, fileData, canRead, canWrite, canOwn) => {
       return FS.createDataFile(parent, name, fileData, canRead, canWrite, canOwn);
     };
-  Module['FS_createDataFile'] = FS_createDataFile;
   
   var preloadPlugins = Module['preloadPlugins'] || [];
-  Module['preloadPlugins'] = preloadPlugins;
   var FS_handledByPreloadPlugin = (byteArray, fullname, finish, onerror) => {
       // Ensure plugins are ready.
       if (typeof Browser != 'undefined') Browser.init();
@@ -2108,7 +2004,6 @@ function dbg(text) {
       });
       return handled;
     };
-  Module['FS_handledByPreloadPlugin'] = FS_handledByPreloadPlugin;
   var FS_createPreloadedFile = (parent, name, url, canRead, canWrite, onload, onerror, dontCreateFile, canOwn, preFinish) => {
       // TODO we should allow people to just pass in a complete filename instead
       // of parent and name being that we just join them anyways
@@ -2138,7 +2033,6 @@ function dbg(text) {
         processData(url);
       }
     };
-  Module['FS_createPreloadedFile'] = FS_createPreloadedFile;
   
   var FS_modeStringToFlags = (str) => {
       var flagModes = {
@@ -2155,7 +2049,6 @@ function dbg(text) {
       }
       return flags;
     };
-  Module['FS_modeStringToFlags'] = FS_modeStringToFlags;
   
   var FS_getMode = (canRead, canWrite) => {
       var mode = 0;
@@ -2163,7 +2056,6 @@ function dbg(text) {
       if (canWrite) mode |= 146;
       return mode;
     };
-  Module['FS_getMode'] = FS_getMode;
   
   
   
@@ -2289,17 +2181,14 @@ function dbg(text) {
   148:"No medium (in tape drive)",
   156:"Level 2 not synchronized",
   };
-  Module['ERRNO_MESSAGES'] = ERRNO_MESSAGES;
   
   var ERRNO_CODES = {
   };
-  Module['ERRNO_CODES'] = ERRNO_CODES;
   
   var demangle = (func) => {
       warnOnce('warning: build with -sDEMANGLE_SUPPORT to link in libcxxabi demangling');
       return func;
     };
-  Module['demangle'] = demangle;
   var demangleAll = (text) => {
       var regex =
         /\b_Z[\w\d_]+/g;
@@ -2309,7 +2198,6 @@ function dbg(text) {
           return x === y ? x : (y + ' [' + x + ']');
         });
     };
-  Module['demangleAll'] = demangleAll;
   var FS = {
   root:null,
   mounts:[],
@@ -3897,7 +3785,6 @@ function dbg(text) {
         abort('FS.standardizePath has been removed; use PATH.normalize instead');
       },
   };
-  Module['FS'] = FS;
   
   
     /**
@@ -3919,7 +3806,6 @@ function dbg(text) {
       assert(typeof ptr == 'number');
       return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead) : '';
     };
-  Module['UTF8ToString'] = UTF8ToString;
   var SYSCALLS = {
   DEFAULT_POLLMASK:5,
   calculateAt(dirfd, path, allowEmpty) {
@@ -4002,7 +3888,6 @@ function dbg(text) {
         return stream;
       },
   };
-  Module['SYSCALLS'] = SYSCALLS;
   var _environ_get = (__environ, environ_buf) => {
       var bufSize = 0;
       getEnvStrings().forEach((string, i) => {
@@ -4013,7 +3898,6 @@ function dbg(text) {
       });
       return 0;
     };
-  Module['_environ_get'] = _environ_get;
 
   
   var _environ_sizes_get = (penviron_count, penviron_buf_size) => {
@@ -4024,7 +3908,6 @@ function dbg(text) {
       HEAPU32[((penviron_buf_size)>>2)] = bufSize;
       return 0;
     };
-  Module['_environ_sizes_get'] = _environ_sizes_get;
 
   function _fd_close(fd) {
   try {
@@ -4037,7 +3920,6 @@ function dbg(text) {
     return e.errno;
   }
   }
-  Module['_fd_close'] = _fd_close;
 
   /** @param {number=} offset */
   var doReadv = (stream, iov, iovcnt, offset) => {
@@ -4056,7 +3938,6 @@ function dbg(text) {
       }
       return ret;
     };
-  Module['doReadv'] = doReadv;
   
   function _fd_read(fd, iov, iovcnt, pnum) {
   try {
@@ -4070,7 +3951,6 @@ function dbg(text) {
     return e.errno;
   }
   }
-  Module['_fd_read'] = _fd_read;
 
   
   var convertI32PairToI53Checked = (lo, hi) => {
@@ -4078,7 +3958,6 @@ function dbg(text) {
       assert(hi === (hi|0));                    // hi should be a i32
       return ((hi + 0x200000) >>> 0 < 0x400001 - !!lo) ? (lo >>> 0) + hi * 4294967296 : NaN;
     };
-  Module['convertI32PairToI53Checked'] = convertI32PairToI53Checked;
   function _fd_seek(fd,offset_low, offset_high,whence,newOffset) {
     var offset = convertI32PairToI53Checked(offset_low, offset_high);;
   
@@ -4097,7 +3976,6 @@ function dbg(text) {
   }
   ;
   }
-  Module['_fd_seek'] = _fd_seek;
 
   /** @param {number=} offset */
   var doWritev = (stream, iov, iovcnt, offset) => {
@@ -4115,7 +3993,6 @@ function dbg(text) {
       }
       return ret;
     };
-  Module['doWritev'] = doWritev;
   
   function _fd_write(fd, iov, iovcnt, pnum) {
   try {
@@ -4129,12 +4006,10 @@ function dbg(text) {
     return e.errno;
   }
   }
-  Module['_fd_write'] = _fd_write;
 
   var isLeapYear = (year) => {
         return year%4 === 0 && (year%100 !== 0 || year%400 === 0);
     };
-  Module['isLeapYear'] = isLeapYear;
   
   var arraySum = (array, index) => {
       var sum = 0;
@@ -4143,14 +4018,11 @@ function dbg(text) {
       }
       return sum;
     };
-  Module['arraySum'] = arraySum;
   
   
   var MONTH_DAYS_LEAP = [31,29,31,30,31,30,31,31,30,31,30,31];
-  Module['MONTH_DAYS_LEAP'] = MONTH_DAYS_LEAP;
   
   var MONTH_DAYS_REGULAR = [31,28,31,30,31,30,31,31,30,31,30,31];
-  Module['MONTH_DAYS_REGULAR'] = MONTH_DAYS_REGULAR;
   var addDays = (date, days) => {
       var newDate = new Date(date.getTime());
       while (days > 0) {
@@ -4177,7 +4049,6 @@ function dbg(text) {
   
       return newDate;
     };
-  Module['addDays'] = addDays;
   
   
   
@@ -4186,7 +4057,6 @@ function dbg(text) {
       assert(array.length >= 0, 'writeArrayToMemory array must have a length (should be an array or typed array)')
       HEAP8.set(array, buffer);
     };
-  Module['writeArrayToMemory'] = writeArrayToMemory;
   
   var _strftime = (s, maxsize, format, tm) => {
       // size_t strftime(char *restrict s, size_t maxsize, const char *restrict format, const struct tm *restrict timeptr);
@@ -4437,11 +4307,87 @@ function dbg(text) {
       writeArrayToMemory(bytes, s);
       return bytes.length-1;
     };
-  Module['_strftime'] = _strftime;
   var _strftime_l = (s, maxsize, format, tm, loc) => {
       return _strftime(s, maxsize, format, tm); // no locale support yet
     };
-  Module['_strftime_l'] = _strftime_l;
+
+  var getCFunc = (ident) => {
+      var func = Module['_' + ident]; // closure exported function
+      assert(func, 'Cannot call unknown function ' + ident + ', make sure it is exported');
+      return func;
+    };
+  
+  
+  
+  var stringToUTF8 = (str, outPtr, maxBytesToWrite) => {
+      assert(typeof maxBytesToWrite == 'number', 'stringToUTF8(str, outPtr, maxBytesToWrite) is missing the third parameter that specifies the length of the output buffer!');
+      return stringToUTF8Array(str, HEAPU8, outPtr, maxBytesToWrite);
+    };
+  var stringToUTF8OnStack = (str) => {
+      var size = lengthBytesUTF8(str) + 1;
+      var ret = stackAlloc(size);
+      stringToUTF8(str, ret, size);
+      return ret;
+    };
+  
+  
+    /**
+     * @param {string|null=} returnType
+     * @param {Array=} argTypes
+     * @param {Arguments|Array=} args
+     * @param {Object=} opts
+     */
+  var ccall = (ident, returnType, argTypes, args, opts) => {
+      // For fast lookup of conversion functions
+      var toC = {
+        'string': (str) => {
+          var ret = 0;
+          if (str !== null && str !== undefined && str !== 0) { // null string
+            // at most 4 bytes per UTF-8 code point, +1 for the trailing '\0'
+            ret = stringToUTF8OnStack(str);
+          }
+          return ret;
+        },
+        'array': (arr) => {
+          var ret = stackAlloc(arr.length);
+          writeArrayToMemory(arr, ret);
+          return ret;
+        }
+      };
+  
+      function convertReturnValue(ret) {
+        if (returnType === 'string') {
+          
+          return UTF8ToString(ret);
+        }
+        if (returnType === 'boolean') return Boolean(ret);
+        return ret;
+      }
+  
+      var func = getCFunc(ident);
+      var cArgs = [];
+      var stack = 0;
+      assert(returnType !== 'array', 'Return type should not be "array".');
+      if (args) {
+        for (var i = 0; i < args.length; i++) {
+          var converter = toC[argTypes[i]];
+          if (converter) {
+            if (stack === 0) stack = stackSave();
+            cArgs[i] = converter(args[i]);
+          } else {
+            cArgs[i] = args[i];
+          }
+        }
+      }
+      var ret = func.apply(null, cArgs);
+      function onDone(ret) {
+        if (stack !== 0) stackRestore(stack);
+        return convertReturnValue(ret);
+      }
+  
+      ret = onDone(ret);
+      return ret;
+    };
 
   var FSNode = /** @constructor */ function(parent, name, mode, rdev) {
     if (!parent) {
@@ -4640,6 +4586,7 @@ var wasmImports = {
 };
 var wasmExports = createWasm();
 var ___wasm_call_ctors = createExportWrapper('__wasm_call_ctors');
+var _transposeCPP = Module['_transposeCPP'] = createExportWrapper('transposeCPP');
 var _adjointCPP = Module['_adjointCPP'] = createExportWrapper('adjointCPP');
 var _inverseCPP = Module['_inverseCPP'] = createExportWrapper('inverseCPP');
 var ___errno_location = createExportWrapper('__errno_location');
@@ -4664,6 +4611,292 @@ var dynCall_iiiiiijj = Module['dynCall_iiiiiijj'] = createExportWrapper('dynCall
 // include: postamble.js
 // === Auto-generated postamble setup entry stuff ===
 
+Module['ccall'] = ccall;
+var missingLibrarySymbols = [
+  'writeI53ToI64',
+  'writeI53ToI64Clamped',
+  'writeI53ToI64Signaling',
+  'writeI53ToU64Clamped',
+  'writeI53ToU64Signaling',
+  'readI53FromI64',
+  'readI53FromU64',
+  'convertI32PairToI53',
+  'convertU32PairToI53',
+  'exitJS',
+  'growMemory',
+  'ydayFromDate',
+  'setErrNo',
+  'inetPton4',
+  'inetNtop4',
+  'inetPton6',
+  'inetNtop6',
+  'readSockaddr',
+  'writeSockaddr',
+  'getHostByName',
+  'getCallstack',
+  'emscriptenLog',
+  'convertPCtoSourceLocation',
+  'readEmAsmArgs',
+  'jstoi_q',
+  'jstoi_s',
+  'listenOnce',
+  'autoResumeAudioContext',
+  'dynCallLegacy',
+  'getDynCaller',
+  'dynCall',
+  'handleException',
+  'runtimeKeepalivePush',
+  'runtimeKeepalivePop',
+  'callUserCallback',
+  'maybeExit',
+  'safeSetTimeout',
+  'asmjsMangle',
+  'handleAllocatorInit',
+  'HandleAllocator',
+  'getNativeTypeSize',
+  'STACK_SIZE',
+  'STACK_ALIGN',
+  'POINTER_SIZE',
+  'ASSERTIONS',
+  'cwrap',
+  'uleb128Encode',
+  'sigToWasmTypes',
+  'generateFuncType',
+  'convertJsFunctionToWasm',
+  'getEmptyTableSlot',
+  'updateTableMap',
+  'getFunctionAddress',
+  'addFunction',
+  'removeFunction',
+  'reallyNegative',
+  'unSign',
+  'strLen',
+  'reSign',
+  'formatString',
+  'intArrayToString',
+  'AsciiToString',
+  'UTF16ToString',
+  'stringToUTF16',
+  'lengthBytesUTF16',
+  'UTF32ToString',
+  'stringToUTF32',
+  'lengthBytesUTF32',
+  'stringToNewUTF8',
+  'registerKeyEventCallback',
+  'maybeCStringToJsString',
+  'findEventTarget',
+  'findCanvasEventTarget',
+  'getBoundingClientRect',
+  'fillMouseEventData',
+  'registerMouseEventCallback',
+  'registerWheelEventCallback',
+  'registerUiEventCallback',
+  'registerFocusEventCallback',
+  'fillDeviceOrientationEventData',
+  'registerDeviceOrientationEventCallback',
+  'fillDeviceMotionEventData',
+  'registerDeviceMotionEventCallback',
+  'screenOrientation',
+  'fillOrientationChangeEventData',
+  'registerOrientationChangeEventCallback',
+  'fillFullscreenChangeEventData',
+  'registerFullscreenChangeEventCallback',
+  'JSEvents_requestFullscreen',
+  'JSEvents_resizeCanvasForFullscreen',
+  'registerRestoreOldStyle',
+  'hideEverythingExceptGivenElement',
+  'restoreHiddenElements',
+  'setLetterbox',
+  'softFullscreenResizeWebGLRenderTarget',
+  'doRequestFullscreen',
+  'fillPointerlockChangeEventData',
+  'registerPointerlockChangeEventCallback',
+  'registerPointerlockErrorEventCallback',
+  'requestPointerLock',
+  'fillVisibilityChangeEventData',
+  'registerVisibilityChangeEventCallback',
+  'registerTouchEventCallback',
+  'fillGamepadEventData',
+  'registerGamepadEventCallback',
+  'registerBeforeUnloadEventCallback',
+  'fillBatteryEventData',
+  'battery',
+  'registerBatteryEventCallback',
+  'setCanvasElementSize',
+  'getCanvasElementSize',
+  'jsStackTrace',
+  'stackTrace',
+  'checkWasiClock',
+  'wasiRightsToMuslOFlags',
+  'wasiOFlagsToMuslOFlags',
+  'createDyncallWrapper',
+  'setImmediateWrapped',
+  'clearImmediateWrapped',
+  'polyfillSetImmediate',
+  'getPromise',
+  'makePromise',
+  'idsToPromises',
+  'makePromiseCallback',
+  'ExceptionInfo',
+  'findMatchingCatch',
+  'setMainLoop',
+  'getSocketFromFD',
+  'getSocketAddress',
+  'FS_unlink',
+  'FS_mkdirTree',
+  '_setNetworkCallback',
+  'heapObjectForWebGLType',
+  'heapAccessShiftForWebGLHeap',
+  'webgl_enable_ANGLE_instanced_arrays',
+  'webgl_enable_OES_vertex_array_object',
+  'webgl_enable_WEBGL_draw_buffers',
+  'webgl_enable_WEBGL_multi_draw',
+  'emscriptenWebGLGet',
+  'computeUnpackAlignedImageSize',
+  'colorChannelsInGlTextureFormat',
+  'emscriptenWebGLGetTexPixelData',
+  '__glGenObject',
+  'emscriptenWebGLGetUniform',
+  'webglGetUniformLocation',
+  'webglPrepareUniformLocationsBeforeFirstUse',
+  'webglGetLeftBracePos',
+  'emscriptenWebGLGetVertexAttrib',
+  '__glGetActiveAttribOrUniform',
+  'writeGLArray',
+  'registerWebGlEventCallback',
+  'runAndAbortIfError',
+  'SDL_unicode',
+  'SDL_ttfContext',
+  'SDL_audio',
+  'ALLOC_NORMAL',
+  'ALLOC_STACK',
+  'allocate',
+  'writeStringToMemory',
+  'writeAsciiToMemory',
+];
+missingLibrarySymbols.forEach(missingLibrarySymbol)
+
+var unexportedSymbols = [
+  'run',
+  'addOnPreRun',
+  'addOnInit',
+  'addOnPreMain',
+  'addOnExit',
+  'addOnPostRun',
+  'addRunDependency',
+  'removeRunDependency',
+  'FS_createFolder',
+  'FS_createPath',
+  'FS_createLazyFile',
+  'FS_createLink',
+  'FS_createDevice',
+  'FS_readFile',
+  'out',
+  'err',
+  'callMain',
+  'abort',
+  'keepRuntimeAlive',
+  'wasmMemory',
+  'wasmExports',
+  'stackAlloc',
+  'stackSave',
+  'stackRestore',
+  'getTempRet0',
+  'setTempRet0',
+  'writeStackCookie',
+  'checkStackCookie',
+  'convertI32PairToI53Checked',
+  'ptrToString',
+  'zeroMemory',
+  'getHeapMax',
+  'abortOnCannotGrowMemory',
+  'ENV',
+  'MONTH_DAYS_REGULAR',
+  'MONTH_DAYS_LEAP',
+  'MONTH_DAYS_REGULAR_CUMULATIVE',
+  'MONTH_DAYS_LEAP_CUMULATIVE',
+  'isLeapYear',
+  'arraySum',
+  'addDays',
+  'ERRNO_CODES',
+  'ERRNO_MESSAGES',
+  'DNS',
+  'Protocols',
+  'Sockets',
+  'initRandomFill',
+  'randomFill',
+  'timers',
+  'warnOnce',
+  'UNWIND_CACHE',
+  'readEmAsmArgsArray',
+  'getExecutableName',
+  'asyncLoad',
+  'alignMemory',
+  'mmapAlloc',
+  'wasmTable',
+  'getCFunc',
+  'freeTableIndexes',
+  'functionsInTableMap',
+  'setValue',
+  'getValue',
+  'PATH',
+  'PATH_FS',
+  'UTF8Decoder',
+  'UTF8ArrayToString',
+  'UTF8ToString',
+  'stringToUTF8Array',
+  'stringToUTF8',
+  'lengthBytesUTF8',
+  'intArrayFromString',
+  'stringToAscii',
+  'UTF16Decoder',
+  'stringToUTF8OnStack',
+  'writeArrayToMemory',
+  'JSEvents',
+  'specialHTMLTargets',
+  'currentFullscreenStrategy',
+  'restoreOldWindowedStyle',
+  'demangle',
+  'demangleAll',
+  'ExitStatus',
+  'getEnvStrings',
+  'doReadv',
+  'doWritev',
+  'promiseMap',
+  'uncaughtExceptionCount',
+  'exceptionLast',
+  'exceptionCaught',
+  'Browser',
+  'wget',
+  'SYSCALLS',
+  'preloadPlugins',
+  'FS_createPreloadedFile',
+  'FS_modeStringToFlags',
+  'FS_getMode',
+  'FS_stdin_getChar_buffer',
+  'FS_stdin_getChar',
+  'FS',
+  'FS_createDataFile',
+  'MEMFS',
+  'TTY',
+  'PIPEFS',
+  'SOCKFS',
+  'tempFixedLengthArray',
+  'miniTempWebGLFloatBuffers',
+  'miniTempWebGLIntBuffers',
+  'GL',
+  'emscripten_webgl_power_preferences',
+  'AL',
+  'GLUT',
+  'EGL',
+  'GLEW',
+  'IDBStore',
+  'SDL',
+  'SDL_gfx',
+  'allocateUTF8',
+  'allocateUTF8OnStack',
+];
+unexportedSymbols.forEach(unexportedRuntimeSymbol);
 
 
 
