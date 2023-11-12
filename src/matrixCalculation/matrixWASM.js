@@ -3,9 +3,10 @@ import WasmModule from "./wasmOutput/output_wasm.js"
 const Module = await WasmModule()
 
 /**
- * Helper function to convert the 1D array back to a 2D array
+ * Helper function to convert the Int32Array or Float32Array
+ * to a 2D array
  *
- * @param {Array} array 1D array
+ * @param {Int32Array, Float32Array} array 1D array
  * @param {number} numRows number of rows
  * @param {number} numCols number of columns
  *
@@ -14,7 +15,9 @@ const Module = await WasmModule()
 const convertArrayToMatrix = (array, numRows, numCols) => {
   const matrix = []
   for (let i = 0; i < numRows; i++) {
-    matrix.push(Array.from(array.subarray(i * numCols, (i + 1) * numCols)))
+    matrix.push(
+      Array.from(array.subarray(i * numCols, (i + 1) * numCols), Number)
+    )
   }
   return matrix
 }
@@ -73,7 +76,7 @@ export const adjointWASM = (inputMatrix) => {
 
   // Allocate memory for the input and result matrix in the WASM module
   const inputMatrixPtr = Module._malloc(flattenedMatrix.length * 4)
-  const resultMatrixPtr = Module._malloc(flattenedMatrix.length * 4)
+  const resultMatrixPtr = Module._malloc(flattenedMatrix.length * 8)
 
   // Copy the flattened matrix data to the allocated memory
   Module.HEAP32.set(flattenedMatrix, inputMatrixPtr / 4)
@@ -86,10 +89,11 @@ export const adjointWASM = (inputMatrix) => {
     [inputMatrixPtr, numRows, resultMatrixPtr]
   )
 
-  // Extract the result as a 1D array
-  const resultArray = Module.HEAP32.subarray(
-    resultMatrixPtr / 4,
-    resultMatrixPtr / 4 + numRows * numCols
+  // Assume resultMatrixPtr points to the result array in Wasm memory
+  const resultArray = new BigInt64Array(
+    Module.HEAPU8.buffer,
+    resultMatrixPtr,
+    numRows * numCols
   )
 
   // Free memory

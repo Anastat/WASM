@@ -2,10 +2,10 @@
 #include <emscripten.h>
 
 // Helper function to create an empty matrix
-int** createIntMatrix(int rows, int cols) {
-    int** matrix = new int*[rows];
+long long** createMatrix(int rows, int cols) {
+    long long** matrix = new long long*[rows];
     for (int i = 0; i < rows; i++) {
-        matrix[i] = new int[cols]();
+        matrix[i] = new long long[cols]();
     }
     return matrix;
 }
@@ -20,7 +20,7 @@ void deleteMatrix(T** matrix, int rows) {
 }
 
 // Helper function to calculate the cofactor of a matrix
-void getCofactor(int** matrix, int** temp, int p, int q, int n) {
+void getCofactor(long long** matrix, long long** temp, int p, int q, int n) {
     int i = 0, j = 0;
     for (int row = 0; row < n; row++) {
         for (int col = 0; col < n; col++) {
@@ -36,13 +36,13 @@ void getCofactor(int** matrix, int** temp, int p, int q, int n) {
 }
 
 // Helper function to calculate the determinant of a matrix
-int determinant(int** matrix, int n) {
+long long determinant(long long** matrix, int n) {
     if (n == 1) return matrix[0][0];
-    int det = 0;
+    long long det = 0;
     int sign = 1;
 
     for (int i = 0; i < n; ++i) {
-        int** submatrix = createIntMatrix(n - 1, n - 1);
+        long long** submatrix = createMatrix(n - 1, n - 1);
         getCofactor(matrix, submatrix, 0, i, n);
         det += sign * matrix[0][i] * determinant(submatrix, n - 1);
 
@@ -68,17 +68,17 @@ extern "C" {
 // Calculates the adjoint of a matrix
 extern "C" {
     EMSCRIPTEN_KEEPALIVE
-    void adjointCPP(int* inputMatrix, int n, int* resultMatrix) {
+    void adjointCPP(int* inputMatrix, int n, long long* resultMatrix) {
         // Convert the pointers to a 2D array
-        int** matrix = createIntMatrix(n, n);
+        long long** matrix = createMatrix(n, n);
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
-                matrix[i][j] = inputMatrix[i * n + j];
+                matrix[i][j] = matrix[i][j] = static_cast<long long>(inputMatrix[i * n + j]);
             }
         }
 
-        int** adj = createIntMatrix(n, n);
-        int** temp = createIntMatrix(n, n);
+        long long** adj = createMatrix(n, n);
+        long long** temp = createMatrix(n, n);
 
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
@@ -91,7 +91,9 @@ extern "C" {
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
                 resultMatrix[i * n + j] = adj[i][j];
+                //std::cout << resultMatrix[i * n + j] << " ";
             }
+            //std::cout << std::endl;
         }
 
         // Delete the dynamically allocated memory for matrix
@@ -106,7 +108,7 @@ extern "C" {
     EMSCRIPTEN_KEEPALIVE
     void inverseCPP(int* inputMatrix, int n, float* resultMatrix) {
         // Convert the pointers to a 2D array
-        int** matrix = createIntMatrix(n, n);
+        long long** matrix = createMatrix(n, n);
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
                 matrix[i][j] = inputMatrix[i * n + j];
@@ -121,8 +123,8 @@ extern "C" {
             return;
         }
 
-        int** adj = createIntMatrix(n, n);
-        int** temp = createIntMatrix(n, n);
+        long long** adj = createMatrix(n, n);
+        long long** temp = createMatrix(n, n);
 
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
