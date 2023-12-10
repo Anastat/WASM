@@ -1,7 +1,7 @@
 const lowerBound = 0
-const upperBound = 1000
-const column = 6
-const row = 6
+const upperBound = 50
+const column = 12
+const row = 12
 
 console.log(`${row} ${column}`)
 

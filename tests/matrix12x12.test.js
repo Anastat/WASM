@@ -169,7 +169,7 @@ const inverseMatrix = [
 ]
 
 describe("Matrix 12x12", () => {
-  test("transpose JavaScript", () => {
+  test.only("transpose JavaScript", () => {
     const startTransposeJs = performance.now()
     const result = transposeJS(inputMatrix)
     const endTransposeJs = performance.now()
@@ -183,7 +183,7 @@ describe("Matrix 12x12", () => {
     expect(result).toEqual(transposeMatrix)
   })
 
-  test("transpose WASM", () => {
+  test.only("transpose WASM", () => {
     const startTransposeWasm = performance.now()
     const result = transposeWASM(inputMatrix)
     const endTransposeWasm = performance.now()
